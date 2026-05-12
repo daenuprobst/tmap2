@@ -10,6 +10,7 @@ Tests cover:
 - Binary container format utilities
 """
 
+import gzip
 import json
 import re
 import warnings
@@ -1122,6 +1123,84 @@ class TestConfigureCard:
         assert match is not None
         meta = json.loads(match.group(1))
         assert meta["card"]["titleColumn"] == "name"
+
+
+class Test3DStructures:
+    """Tests for local 3D structure metadata and sidecar handling."""
+
+    def test_add_3d_structures_defaults_to_url(self):
+        viz = TmapViz()
+        viz.add_3d_structures(["pdbs/1CRN.pdb"], fmt="mmcif")
+
+        assert viz._structures_3d_column == "structure"
+        assert viz._structures_3d_source == "url"
+        assert viz._structures_3d_format == "cif"
+
+    def test_add_3d_structures_accepts_text_source(self):
+        viz = TmapViz()
+        viz.add_3d_structures(["HEADER test\nEND\n"], source="text", fmt="pdb")
+
+        assert viz._structures_3d_source == "text"
+
+    def test_add_3d_structures_rejects_invalid_source(self):
+        viz = TmapViz()
+        with pytest.raises(ValueError, match="source must be 'url' or 'text'"):
+            viz.add_3d_structures(["HEADER test\nEND\n"], source="inline")
+
+    def test_3d_structures_auto_select_protein_template(self, tmp_path):
+        viz = TmapViz()
+        viz.set_points([0.0], [0.0])
+        viz.add_3d_structures(["pdbs/1CRN.pdb"])
+
+        html = viz.to_html()
+        assert "Protein template" in html
+        assert '"structures3dSource":"url"' in html
+
+        out = viz.write_static(tmp_path / "out")
+        index_html = (out / "index.html").read_text()
+        assert "Protein template" in index_html
+
+    def test_add_3d_structure_files_copies_sidecars(self, tmp_path):
+        src_dir = tmp_path / "input"
+        src_dir.mkdir()
+        pdb = src_dir / "1CRN.pdb"
+        pdb.write_text("HEADER test\nEND\n")
+
+        viz = TmapViz()
+        viz.set_points([0.0, 1.0, 2.0], [0.0, 0.5, 1.0])
+        viz.add_3d_structure_files([pdb, None, pdb], fmt="pdb")
+
+        out = viz.write_static(tmp_path / "out")
+
+        copied = out / "structures" / "1CRN.pdb"
+        assert copied.read_text() == "HEADER test\nEND\n"
+
+        meta = json.loads((out / "metadata.json").read_text())
+        assert meta["structures3dColumn"] == "structure"
+        assert meta["structures3dSource"] == "url"
+        assert meta["structures3dFormat"] == "pdb"
+
+        col_file = out / f"col_{meta['columns']['structure']['file']}.bin"
+        urls = json.loads(gzip.decompress(col_file.read_bytes()).decode())
+        assert urls == ["structures/1CRN.pdb", "", "structures/1CRN.pdb"]
+
+    def test_add_3d_structure_files_write_html_copies_sidecars(self, tmp_path):
+        pdb = tmp_path / "1CRN.pdb"
+        pdb.write_text("HEADER test\nEND\n")
+
+        viz = TmapViz()
+        viz.set_points([0.0], [0.0])
+        viz.add_3d_structure_files([pdb])
+
+        html_path = viz.write_html(tmp_path / "viz.html")
+
+        assert html_path.exists()
+        assert (tmp_path / "structures" / "1CRN.pdb").read_text() == "HEADER test\nEND\n"
+
+    def test_add_3d_structure_files_rejects_unsafe_directory(self):
+        viz = TmapViz()
+        with pytest.raises(ValueError, match="relative path"):
+            viz.add_3d_structure_files(["1CRN.pdb"], directory="../outside")
 
 
 class TestBackwardCompat:

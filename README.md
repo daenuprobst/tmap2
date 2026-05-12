@@ -42,6 +42,7 @@ Optional extras:
 ```bash
 pip install rdkit # chemistry helpers (fingerprints_from_smiles, molecular_properties)
 pip install jupyter-scatter # notebook interactive widgets
+pip install biopython # protein helpers (ProtParam properties, PDB parsing)
 ```
 
 > **Note:** The import name is `tmap`, not `tmap2`.
