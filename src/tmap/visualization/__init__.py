@@ -25,7 +25,8 @@ Features:
 - Configurable pinned cards (``configure_card()``)
 - SMILES molecule rendering (``add_smiles()``)
 - Image thumbnails (``add_images()``)
-- Protein 3D structures via Mol* (``add_protein_ids()``)
+- Protein 3D structures via 3Dmol.js (``add_protein_ids()``,
+  ``add_3d_structure_files()``)
 - Fetch-based serving for very large datasets (``serve()`` / ``write_static()``)
 
 Colormaps

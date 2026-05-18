@@ -1,0 +1,111 @@
+{#
+  Protein Template — render 3D structures on pinned cards.
+
+  Pairs with TmapViz.add_3d_structures(...) or add_3d_structure_files(...).
+
+  Two transports:
+    - source="url": each cell is a URL (relative or absolute). Browser fetches
+      lazily on pin. Small HTML + sidecar directory of structure files.
+    - source="text": each cell is full PDB/mmCIF text, baked into the data
+      payload. Larger output; 3Dmol.js still loads from CDN.
+
+  No AlphaFold lookup, no UniProt fetches, no fallback paths. Whatever the
+  user passes is what gets rendered.
+
+  Usage:
+    viz.add_3d_structure_files(paths)
+    viz.write_static("out")
+#}
+{% extends "base.html.j2" %}
+
+{% block extra_styles %}
+    .card .card-structure-container .structure-error {
+      color: #ff8888;
+      font-size: 11px;
+      padding: 12px;
+      text-align: center;
+      word-break: break-all;
+    }
+    .card .card-structure-container .structure-loading {
+      color: #aaa;
+      font-size: 12px;
+      padding: 12px;
+      text-align: center;
+    }
+{% endblock %}
+
+{% block extra_runtime %}
+// ====================================================================
+// Protein template — 3D structure rendering (raw text or URL fetch)
+// ====================================================================
+
+const structures3dColumn = metadata.structures3dColumn;
+const structures3dSource = metadata.structures3dSource || 'url';
+const structures3dFormat = metadata.structures3dFormat || 'pdb';
+
+if (structures3dColumn && columnMeta[structures3dColumn]) {
+  // Cache fetched URLs so re-pinning is instant.
+  const urlCache = new Map();
+
+  async function fetchStructure(url) {
+    if (urlCache.has(url)) return urlCache.get(url);
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const text = await resp.text();
+    urlCache.set(url, text);
+    return text;
+  }
+
+  cardStack.addEventListener('cardrendered', async (e) => {
+    const { idx } = e.detail;
+    const col = columns[structures3dColumn] || await fetchColumn(structures3dColumn);
+    if (!col) return;
+    const value = col.values[idx];
+    if (!value || typeof value !== 'string' || !value.trim()) return;
+
+    const cards = cardStack.querySelectorAll('.card');
+    const card = cards[cards.length - 1];
+    if (!card) return;
+
+    const sc = card.querySelector('.card-structure-container');
+    if (!sc) return;
+
+    sc.classList.remove('hidden');
+    sc.style.height = '250px';
+    sc.style.background = '#1a1a2e';
+    sc.innerHTML = '<span class="structure-loading">Loading 3D viewer…</span>';
+
+    try {
+      await load3Dmol();
+    } catch (err) {
+      sc.innerHTML = '<span class="structure-error">Viewer unavailable</span>';
+      return;
+    }
+
+    let structureText;
+    try {
+      if (structures3dSource === 'url') {
+        sc.innerHTML = '<span class="structure-loading">Fetching structure…</span>';
+        structureText = await fetchStructure(value);
+      } else {
+        structureText = value;
+      }
+    } catch (err) {
+      sc.innerHTML = '<span class="structure-error">Failed to load ' +
+        (structures3dSource === 'url' ? escapeHtml(value) : 'structure') + '</span>';
+      return;
+    }
+
+    try {
+      render3DStructure(sc, structureText, structures3dFormat);
+    } catch (err) {
+      sc.innerHTML = '<span class="structure-error">Failed to render structure</span>';
+    }
+  });
+
+  console.log('Protein template active:', structures3dColumn,
+    'source=' + structures3dSource, 'format=' + structures3dFormat);
+} else if (structures3dColumn) {
+  console.log('structures3dColumn specified but column not found');
+}
+{% endblock %}

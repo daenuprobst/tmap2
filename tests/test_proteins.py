@@ -11,10 +11,8 @@ import pytest
 from tmap.utils.proteins import (
     AVAILABLE_SEQUENCE_PROPERTIES,
     DEFAULT_FIELDS,
-    _compute_pI,
     _fetch_one_alphafold,
     _is_valid_sequence,
-    _net_charge_at_ph,
     fetch_alphafold,
     fetch_uniprot,
     parse_alignment,
@@ -55,34 +53,6 @@ class TestIsValidSequence:
         assert not _is_valid_sequence("AC1DE")
 
 
-class TestNetCharge:
-    def test_neutral_at_pI(self):
-        """At the pI, charge should be ~0."""
-        pi = _compute_pI(UBIQUITIN)
-        charge = _net_charge_at_ph(pi, UBIQUITIN)
-        assert abs(charge) < 0.01
-
-    def test_positive_at_low_ph(self):
-        charge = _net_charge_at_ph(2.0, UBIQUITIN)
-        assert charge > 0
-
-    def test_negative_at_high_ph(self):
-        charge = _net_charge_at_ph(12.0, UBIQUITIN)
-        assert charge < 0
-
-
-class TestComputePI:
-    def test_ubiquitin_pI(self):
-        """Ubiquitin pI varies by pKa table (~6.6-7.7). Ours uses textbook values."""
-        pi = _compute_pI(UBIQUITIN)
-        assert 6.0 < pi < 8.5
-
-    def test_insulin_b_pI(self):
-        """Insulin B chain — basic protein, pI around 6-8."""
-        pi = _compute_pI(INSULIN_B)
-        assert 5.0 < pi < 9.0
-
-
 class TestSequenceProperties:
     def test_basic_output_shape(self):
         props = sequence_properties(["ACDE", "FGHI"])
@@ -102,10 +72,10 @@ class TestSequenceProperties:
         assert 8400 < mw < 8700
 
     def test_molecular_weight_glycine(self):
-        """Single glycine: residue mass (57.02146) + water (18.01056) ≈ 75.03."""
+        """Single glycine via ProtParam (average masses): ~75.07 Da."""
         props = sequence_properties(["G"])
         mw = props["molecular_weight"][0]
-        assert abs(mw - 75.032) < 0.01
+        assert abs(mw - 75.07) < 0.05
 
     def test_gravy(self):
         """GRAVY for all-Isoleucine should be 4.5 (highest KD value)."""
@@ -150,6 +120,18 @@ class TestSequenceProperties:
         """All-aspartate peptide should be very negative at pH 7."""
         props = sequence_properties(["DDDDD"])
         assert props["charge_at_ph7"][0] < -4.0
+
+    def test_custom_properties_do_not_require_biopython(self):
+        with patch("tmap.utils.proteins.importlib.util.find_spec", return_value=None):
+            props = sequence_properties(["ACDE"], properties=["length", "frac_charged"])
+
+        np.testing.assert_array_equal(props["length"], [4])
+        np.testing.assert_array_equal(props["frac_charged"], [0.5])
+
+    def test_protparam_properties_require_biopython(self):
+        with patch("tmap.utils.proteins.importlib.util.find_spec", return_value=None):
+            with pytest.raises(ImportError, match="sequence_properties requires biopython"):
+                sequence_properties(["ACDE"], properties=["molecular_weight"])
 
 
 class TestSequencePropertiesExport:
@@ -402,6 +384,22 @@ class TestReadFasta:
         assert ids == ["id1", "id2"]
         assert seqs == ["ACDEFGHI", "KLMN"]
 
+    def test_does_not_require_biopython(self, tmp_path):
+        fasta = tmp_path / "test.fa"
+        fasta.write_text(">id1\nACDE\n")
+        with patch("tmap.utils.proteins.importlib.util.find_spec", return_value=None):
+            ids, seqs = read_fasta(fasta)
+
+        assert ids == ["id1"]
+        assert seqs == ["ACDE"]
+
+    def test_empty_record_preserved(self, tmp_path):
+        fasta = tmp_path / "empty_record.fa"
+        fasta.write_text(">id1\n>id2\nACDE\n")
+        ids, seqs = read_fasta(fasta)
+        assert ids == ["id1", "id2"]
+        assert seqs == ["", "ACDE"]
+
     def test_export(self):
         from tmap.utils import read_fasta as rf
 
@@ -548,7 +546,7 @@ class TestReadPdb:
         assert result["length"] == 4
 
     def test_no_header_uses_filename(self, tmp_path):
-        pdb_content = "ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00 80.00\nEND\n"
+        pdb_content = "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 80.00\nEND\n"
         f = tmp_path / "myprotein.pdb"
         f.write_text(pdb_content)
         result = read_pdb(f)
@@ -564,9 +562,9 @@ class TestReadPdb:
 
     def test_non_standard_residues_skipped(self, tmp_path):
         pdb_content = (
-            "ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00 80.00\n"
-            "ATOM      2  CA  UNK A   2       2.0   3.0   4.0  1.00 70.00\n"
-            "ATOM      3  CA  GLY A   3       3.0   4.0   5.0  1.00 60.00\n"
+            "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 80.00\n"
+            "ATOM      2  CA  UNK A   2       2.000   3.000   4.000  1.00 70.00\n"
+            "ATOM      3  CA  GLY A   3       3.000   4.000   5.000  1.00 60.00\n"
             "END\n"
         )
         f = tmp_path / "test.pdb"
@@ -577,8 +575,8 @@ class TestReadPdb:
 
     def test_hetatm_ignored(self, tmp_path):
         pdb_content = (
-            "ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00 80.00\n"
-            "HETATM    2  CA  ALA A   2       2.0   3.0   4.0  1.00 70.00\n"
+            "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 80.00\n"
+            "HETATM    2  CA  ALA A   2       2.000   3.000   4.000  1.00 70.00\n"
             "END\n"
         )
         f = tmp_path / "test.pdb"
@@ -604,7 +602,9 @@ class TestReadPdbDir:
                 ("VAL", "30.00"),
             ]
         ):
-            content = f"ATOM      1  CA  {seq_line} A   1       1.0   2.0   3.0  1.00 {bf}\nEND\n"
+            content = (
+                f"ATOM      1  CA  {seq_line} A   1       1.000   2.000   3.000  1.00 {bf}\nEND\n"
+            )
             (tmp_path / f"prot{i}.pdb").write_text(content)
 
         ids, seqs, props = read_pdb_dir(tmp_path)
@@ -621,10 +621,10 @@ class TestReadPdbDir:
 
     def test_pattern_filter(self, tmp_path):
         (tmp_path / "a.pdb").write_text(
-            "ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00 80.00\nEND\n"
+            "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 80.00\nEND\n"
         )
         (tmp_path / "b.ent").write_text(
-            "ATOM      1  CA  GLY A   1       1.0   2.0   3.0  1.00 90.00\nEND\n"
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 90.00\nEND\n"
         )
         ids, seqs, props = read_pdb_dir(tmp_path, pattern="*.ent")
         assert len(ids) == 1

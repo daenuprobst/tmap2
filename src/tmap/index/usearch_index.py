@@ -28,6 +28,25 @@ _METRIC_MAP = {
 }
 
 
+def _stable_sort_neighbors(
+    keys: NDArray,
+    dists: NDArray,
+) -> tuple[NDArray, NDArray]:
+    """Reorder each row by (distance, key) so equidistant neighbors are stable.
+
+    USearch's HNSW build is multi-threaded; equally-distant neighbors can
+    come back in different positions across runs. Reordering each row by
+    distance and then by key removes that source of non-determinism so the
+    same data + same seed always produces the same kNN graph.
+    """
+    if keys.ndim != 2 or keys.size == 0:
+        return keys, dists
+    # lexsort sorts by the last key as primary -> (dists primary, keys secondary)
+    order = np.lexsort((keys, dists), axis=1)
+    rows = np.arange(keys.shape[0])[:, None]
+    return keys[rows, order], dists[rows, order]
+
+
 class USearchIndex:
     """Nearest-neighbor index using USearch.
 
@@ -50,6 +69,7 @@ class USearchIndex:
         connectivity: int = 32,
         expansion_add: int = 256,
         expansion_search: int = 200,
+        threads: int = 0,
     ) -> None:
         if mode not in {"auto", "exact", "hnsw"}:
             raise ValueError(f"mode must be auto/exact/hnsw, got {mode!r}")
@@ -58,6 +78,9 @@ class USearchIndex:
         self._connectivity = connectivity
         self._expansion_add = expansion_add
         self._expansion_search = expansion_search
+        # threads=0 -> use all cores (fastest, non-deterministic graph).
+        # threads=1 -> deterministic HNSW build at a ~5-7x build-time cost.
+        self._threads = threads
         self._effective_mode: str | None = None
         self._vectors: NDArray[np.float32] | None = None
         self._binary_vectors: NDArray[np.uint8] | None = None
@@ -134,7 +157,7 @@ class USearchIndex:
                 expansion_search=self._expansion_search,
             )
             keys = np.arange(n, dtype=np.int64)
-            idx.add(keys, vectors)
+            idx.add(keys, vectors, threads=self._threads)
             self._usearch_index = idx
 
         # For exact mode we skip HNSW build entirely; queries use
@@ -188,7 +211,7 @@ class USearchIndex:
             expansion_search=self._expansion_search,
         )
         keys = np.arange(n, dtype=np.int64)
-        idx.add(keys, packed)
+        idx.add(keys, packed, threads=self._threads)
 
         self._usearch_index = idx
         self._binary_vectors = packed
@@ -299,6 +322,7 @@ class USearchIndex:
         keys, dists = self._search(queries, k + 1)
         keys, dists = self._strip_self(keys, dists, k)
         dists = self._convert_distances(dists)
+        keys, dists = _stable_sort_neighbors(keys, dists)
         return KNNGraph.from_arrays(
             self._safe_int32(keys),
             dists.astype(np.float32),
@@ -346,6 +370,7 @@ class USearchIndex:
         queries = self._prepare_query(np.asarray(points))
         keys, dists = self._search(queries, k)
         dists = self._convert_distances(dists)
+        keys, dists = _stable_sort_neighbors(keys, dists)
         return self._safe_int32(keys), dists.astype(np.float32)
 
     # -- persistence --

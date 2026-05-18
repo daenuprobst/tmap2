@@ -14,7 +14,7 @@ Alignment parsers:
 
 Sequence analysis:
 
-- ``sequence_properties`` — physicochemical properties (offline, no deps)
+- ``sequence_properties`` — physicochemical properties (custom + ProtParam-backed)
 
 API fetchers:
 
@@ -25,6 +25,7 @@ API fetchers:
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import logging
 import re
@@ -39,80 +40,22 @@ from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
+
+def _require_biopython(feature: str) -> None:
+    """Raise a clear ImportError if biopython is missing."""
+    if importlib.util.find_spec("Bio") is None:
+        raise ImportError(
+            f'{feature} requires biopython. Install with `pip install "tmap2[proteins]"` '
+            f"or `pip install biopython`."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Amino acid lookup tables
 # ---------------------------------------------------------------------------
 
 # Standard 20 amino acids
 _STANDARD_AA = set("ACDEFGHIKLMNPQRSTVWY")
-
-# Monoisotopic residue masses (Da) — residue mass (loses water on peptide bond)
-_AA_WEIGHTS: dict[str, float] = {
-    "A": 71.03711,
-    "R": 156.10111,
-    "N": 114.04293,
-    "D": 115.02694,
-    "C": 103.00919,
-    "E": 129.04259,
-    "Q": 128.05858,
-    "G": 57.02146,
-    "H": 137.05891,
-    "I": 113.08406,
-    "L": 113.08406,
-    "K": 128.09496,
-    "M": 131.04049,
-    "F": 147.06841,
-    "P": 97.05276,
-    "S": 87.03203,
-    "T": 101.04768,
-    "W": 186.07931,
-    "Y": 163.06333,
-    "V": 99.06841,
-}
-
-_WATER_MASS: float = 18.01056
-
-# Kyte-Doolittle hydrophobicity scale
-_KD_HYDROPHOBICITY: dict[str, float] = {
-    "A": 1.8,
-    "R": -4.5,
-    "N": -3.5,
-    "D": -3.5,
-    "C": 2.5,
-    "E": -3.5,
-    "Q": -3.5,
-    "G": -0.4,
-    "H": -3.2,
-    "I": 4.5,
-    "L": 3.8,
-    "K": -3.9,
-    "M": 1.9,
-    "F": 2.8,
-    "P": -1.6,
-    "S": -0.8,
-    "T": -0.7,
-    "W": -0.9,
-    "Y": -1.3,
-    "V": 4.2,
-}
-
-# pKa values for isoelectric point calculation
-# Format: (pKa, charge_when_protonated)
-# Positive residues gain +1 when protonated (below pKa)
-# Negative residues/groups lose -1 when deprotonated (above pKa)
-_PKA_NTERM = 9.69  # alpha-amino (positive when protonated)
-_PKA_CTERM = 2.34  # alpha-carboxyl (negative when deprotonated)
-
-# Side-chain pKa values and charge contribution
-_PKA_SIDECHAINS: dict[str, tuple[float, int]] = {
-    "D": (3.65, -1),  # Asp — negative when deprotonated
-    "E": (4.25, -1),  # Glu
-    "C": (8.18, -1),  # Cys
-    "Y": (10.07, -1),  # Tyr
-    "H": (6.00, 1),  # His — positive when protonated
-    "K": (10.54, 1),  # Lys
-    "R": (12.48, 1),  # Arg
-}
 
 AVAILABLE_SEQUENCE_PROPERTIES: list[str] = [
     "length",
@@ -129,6 +72,16 @@ AVAILABLE_SEQUENCE_PROPERTIES: list[str] = [
     "frac_basic",
     "n_cysteines",
 ]
+
+_PROTPARAM_SEQUENCE_PROPERTIES = frozenset(
+    {
+        "molecular_weight",
+        "isoelectric_point",
+        "gravy",
+        "charge_at_ph7",
+        "aromaticity",
+    }
+)
 
 # Three-letter to one-letter amino acid code mapping (for PDB parsing)
 _AA3_TO_1: dict[str, str] = {
@@ -188,38 +141,7 @@ def _is_valid_sequence(seq: str) -> bool:
     return len(seq) > 0 and all(c in _STANDARD_AA for c in seq)
 
 
-def _net_charge_at_ph(ph: float, seq: str) -> float:
-    """Compute net charge of a protein at a given pH."""
-    # N-terminus: positive when protonated
-    charge = 1.0 / (1.0 + 10.0 ** (ph - _PKA_NTERM))
-    # C-terminus: negative when deprotonated
-    charge -= 1.0 / (1.0 + 10.0 ** (_PKA_CTERM - ph))
-
-    for aa in seq:
-        if aa in _PKA_SIDECHAINS:
-            pka, sign = _PKA_SIDECHAINS[aa]
-            if sign == 1:  # positive when protonated (H, K, R)
-                charge += 1.0 / (1.0 + 10.0 ** (ph - pka))
-            else:  # negative when deprotonated (D, E, C, Y)
-                charge -= 1.0 / (1.0 + 10.0 ** (pka - ph))
-    return charge
-
-
-def _compute_pI(seq: str) -> float:
-    """Estimate isoelectric point by bisection."""
-    lo, hi = 0.0, 14.0
-    for _ in range(100):
-        mid = (lo + hi) / 2.0
-        charge = _net_charge_at_ph(mid, seq)
-        if charge > 0:
-            lo = mid
-        else:
-            hi = mid
-    return (lo + hi) / 2.0
-
-
 _HYDROPHOBIC_AA = frozenset("AVILMFW")
-_AROMATIC_AA = frozenset("FWY")
 _CHARGED_AA = frozenset("DEKR")
 _ACIDIC_AA = frozenset("DE")
 _BASIC_AA = frozenset("KRH")
@@ -240,20 +162,35 @@ def _aliphatic_index(seq: str) -> float:
     return 100.0 * (xa + 2.9 * xv + 3.9 * (xi + xl))
 
 
-def _compute_prop(name: str, seq: str) -> float:
-    """Compute a single named property for a valid sequence."""
+def _compute_prop(name: str, seq: str, analysis=None) -> float:  # noqa: ANN001
+    """Compute a single named property for a valid sequence.
+
+    ``analysis`` is a ``Bio.SeqUtils.ProtParam.ProteinAnalysis`` instance,
+    cached per-sequence by the caller when ProtParam-backed properties are
+    requested.
+    """
     if name == "length":
         return float(len(seq))
     if name == "molecular_weight":
-        return sum(_AA_WEIGHTS[aa] for aa in seq) + _WATER_MASS
+        if analysis is None:
+            raise RuntimeError("molecular_weight requires ProteinAnalysis")
+        return float(analysis.molecular_weight())
     if name == "isoelectric_point":
-        return _compute_pI(seq)
+        if analysis is None:
+            raise RuntimeError("isoelectric_point requires ProteinAnalysis")
+        return float(analysis.isoelectric_point())
     if name == "gravy":
-        return sum(_KD_HYDROPHOBICITY[aa] for aa in seq) / len(seq)
+        if analysis is None:
+            raise RuntimeError("gravy requires ProteinAnalysis")
+        return float(analysis.gravy())
     if name == "charge_at_ph7":
-        return _net_charge_at_ph(7.0, seq)
+        if analysis is None:
+            raise RuntimeError("charge_at_ph7 requires ProteinAnalysis")
+        return float(analysis.charge_at_pH(7.0))
     if name == "aromaticity":
-        return _frac_of(seq, _AROMATIC_AA)
+        if analysis is None:
+            raise RuntimeError("aromaticity requires ProteinAnalysis")
+        return float(analysis.aromaticity())
     if name == "aliphatic_index":
         return _aliphatic_index(seq)
     if name == "frac_charged":
@@ -321,30 +258,34 @@ def read_fasta(
     Returns
     -------
     ids : list[str]
-        Header lines (everything after ``>`` up to the first whitespace).
+        First whitespace-delimited token after ``>`` for each record.
     sequences : list[str]
-        Protein sequences (uppercased, multi-line concatenated).
+        Protein sequences (uppercased).
     """
     ids: list[str] = []
     sequences: list[str] = []
+    current_id: str | None = None
     current_seq: list[str] = []
 
     with open(path) as f:
-        for line in f:
-            line = line.strip()
+        for raw_line in f:
+            line = raw_line.strip()
             if not line:
                 continue
             if line.startswith(">"):
-                if current_seq:
+                if current_id is not None:
+                    ids.append(current_id)
                     sequences.append("".join(current_seq).upper())
-                    current_seq = []
-                if max_seqs is not None and len(ids) >= max_seqs:
-                    break
-                # ID = first whitespace-delimited token after '>'
-                ids.append(line[1:].split()[0] if line[1:].strip() else "")
-            else:
+                    if max_seqs is not None and len(ids) >= max_seqs:
+                        break
+                header = line[1:].strip()
+                current_id = header.split()[0] if header else ""
+                current_seq = []
+            elif current_id is not None:
                 current_seq.append(line)
-        if current_seq and (max_seqs is None or len(sequences) < max_seqs):
+
+        if current_id is not None and (max_seqs is None or len(ids) < max_seqs):
+            ids.append(current_id)
             sequences.append("".join(current_seq).upper())
 
     return ids, sequences
@@ -460,44 +401,36 @@ def read_pdb(
         - ``frac_bfactor_high`` — fraction of residues with B-factor > 90
         - ``frac_bfactor_low`` — fraction of residues with B-factor < 50
     """
+    _require_biopython("read_pdb")
+    from Bio.PDB.PDBParser import PDBParser
+
     path = Path(path)
-    pdb_id = path.stem
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure(path.stem, str(path))
+
+    header_id = (parser.get_header().get("idcode") or "").strip().upper()
+    pdb_id = header_id or path.stem
+
     residues: list[str] = []
     bfactors: list[float] = []
 
-    with open(path) as f:
-        for line in f:
-            # Extract PDB ID from HEADER record
-            if line.startswith("HEADER"):
-                header_id = line[62:66].strip()
-                if header_id:
-                    pdb_id = header_id
-
-            if not line.startswith("ATOM"):
+    # Use first model only (NMR ensembles have many; X-ray has one)
+    model = next(iter(structure), None)
+    if model is not None:
+        for chain_obj in model:
+            if chain is not None and chain_obj.id != chain:
                 continue
-
-            # PDB fixed-width: atom name at 12-16, residue name 17-20,
-            # chain ID 21, B-factor 60-66
-            atom_name = line[12:16].strip()
-            if atom_name != "CA":
-                continue
-
-            chain_id = line[21]
-            if chain is not None and chain_id != chain:
-                continue
-
-            resname = line[17:20].strip()
-            aa = _AA3_TO_1.get(resname)
-            if aa is None:
-                continue  # skip non-standard residues
-
-            try:
-                bfactor = float(line[60:66])
-            except (ValueError, IndexError):
-                bfactor = float("nan")
-
-            residues.append(aa)
-            bfactors.append(bfactor)
+            for residue in chain_obj:
+                # Skip HETATM (residue.id[0] is " " for ATOM, "H_..." or "W" otherwise)
+                if residue.id[0] != " ":
+                    continue
+                aa = _AA3_TO_1.get(residue.get_resname())
+                if aa is None:
+                    continue  # skip non-standard residues
+                if "CA" not in residue:
+                    continue
+                residues.append(aa)
+                bfactors.append(float(residue["CA"].get_bfactor()))
 
     sequence = "".join(residues)
     length = len(residues)
@@ -741,6 +674,12 @@ def sequence_properties(
     if n == 0:
         return {k: np.empty(0, dtype=np.float64) for k in properties}
 
+    needs_protparam = any(p in _PROTPARAM_SEQUENCE_PROPERTIES for p in properties)
+    ProteinAnalysis = None
+    if needs_protparam:
+        _require_biopython("sequence_properties")
+        from Bio.SeqUtils.ProtParam import ProteinAnalysis
+
     n_props = len(properties)
     out = np.full((n, n_props), np.nan, dtype=np.float64)
     n_invalid = 0
@@ -751,8 +690,9 @@ def sequence_properties(
             continue
         seq_upper = seq.upper()
         if _is_valid_sequence(seq_upper):
+            analysis = ProteinAnalysis(seq_upper) if ProteinAnalysis is not None else None
             for j, name in enumerate(properties):
-                out[i, j] = _compute_prop(name, seq_upper)
+                out[i, j] = _compute_prop(name, seq_upper, analysis)
         else:
             n_invalid += 1
 

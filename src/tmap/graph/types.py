@@ -214,6 +214,58 @@ class Tree:
                     break
         return total
 
+    def hops(self, from_idx: int, to_idx: int) -> int:
+        """Number of edges on the unique tree path between two nodes.
+
+        Unlike :meth:`distance`, this ignores edge weights and counts
+        graph hops.
+
+        Parameters
+        ----------
+        from_idx : int
+            Source node index.
+        to_idx : int
+            Target node index.
+
+        Returns
+        -------
+        int
+            Edge count along the path (0 when ``from_idx == to_idx``).
+        """
+        return len(self.path(from_idx, to_idx)) - 1
+
+    def hops_from(self, source: int) -> NDArray[np.int32]:
+        """Hop count from *source* to every other node.
+
+        Unweighted analogue of :meth:`distances_from`.  Unreachable nodes
+        (disconnected forest) receive ``-1``.
+
+        Parameters
+        ----------
+        source : int
+            Source node index.
+
+        Returns
+        -------
+        NDArray[np.int32]
+            Array of shape ``(n_nodes,)`` with hop counts.
+        """
+        if not (0 <= source < self.n_nodes):
+            raise ValueError(f"source={source} out of range [0, {self.n_nodes})")
+
+        hops: NDArray[np.int32] = np.full(self.n_nodes, -1, dtype=np.int32)
+        hops[source] = 0
+        queue: deque[int] = deque([source])
+
+        while queue:
+            node = queue.popleft()
+            for neighbor, _ in self._adjacency[node]:
+                if hops[neighbor] == -1:
+                    hops[neighbor] = hops[node] + 1
+                    queue.append(neighbor)
+
+        return hops
+
     def subtree(self, node_idx: int, depth: int | None = None) -> list[int]:
         """Return nodes reachable from *node_idx* within *depth* hops.
 

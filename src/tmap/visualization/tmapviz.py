@@ -4,6 +4,7 @@ import base64
 import gzip
 import json
 import math
+import shutil
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -123,6 +124,34 @@ def _sanitize_filename(name: str, seen: set[str] | None = None) -> str:
             counter += 1
         seen.add(safe)
     return safe
+
+
+def _unique_structure_filename(path: str | Path, seen: set[str]) -> str:
+    """Return a URL-safe unique filename for a copied structure sidecar."""
+    raw = Path(path).name or "structure"
+    safe = _sanitize_filename(raw) or "structure"
+    parsed = Path(safe)
+    stem = parsed.stem or "structure"
+    suffix = parsed.suffix
+
+    candidate = f"{stem}{suffix}"
+    counter = 2
+    while candidate in seen:
+        candidate = f"{stem}_{counter}{suffix}"
+        counter += 1
+    seen.add(candidate)
+    return candidate
+
+
+def _normalize_structure_sidecar_dir(directory: str | Path) -> str:
+    """Validate and normalize a relative output directory for structure files."""
+    path = Path(directory)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("directory must be a relative path inside the output bundle")
+    normalized = path.as_posix().strip("/")
+    if not normalized or normalized == ".":
+        raise ValueError("directory must not be empty")
+    return normalized
 
 
 def _normalize_coords(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -388,8 +417,11 @@ class TmapViz:
         self._images_column: str | None = None
         self._images_tooltip_size: int = 128
         self._protein_column: str | None = None
-        self._structures_column: str | None = None
-        self._structures_format: str = "pdb"
+        self._structures_3d_column: str | None = None
+        self._structures_3d_source: str = "url"
+        self._structures_3d_format: str = "pdb"
+        self._structures_3d_file_paths: list[Path | None] | None = None
+        self._structures_3d_copy_sidecars: bool = False
         self._columns: dict[str, Column] = {}
 
         # Custom hex colormaps registered via add_color_layout(color=[...] or color={...})
@@ -772,27 +804,48 @@ class TmapViz:
             self._labels_keys.append(name)
         self._columns[name] = Column(name, values, "label", "label")
 
-    def add_structures(
+    def add_3d_structures(
         self,
         values: list[str],
-        name: str = "structure",
+        *,
+        source: str = "url",
         fmt: str = "pdb",
+        name: str = "structure",
     ) -> None:
-        """Add inline 3D structure data for rendering in pinned cards.
+        """Attach per-point 3D molecular structures for the protein template.
 
-        Each value should be the full text content of a PDB or mmCIF file.
-        Structures are rendered using 3Dmol.js (loaded from CDN on demand).
+        Each pinned card renders the structure with 3Dmol.js. If structures
+        are attached and the default template is used, the protein template is
+        selected automatically.
+
+        Two transports:
+
+        - ``source="url"`` — each value is an absolute URL or a path relative
+          to the rendered HTML (e.g. ``"pdbs/1CRN.pdb"``). The browser fetches
+          the file lazily on pin. This is the scalable default.
+        - ``source="text"`` — each value is the full text of a PDB or mmCIF
+          file. The structure text is gzip+base64-embedded in the HTML, so the
+          data payload is self-contained but the viewer still loads 3Dmol.js
+          from its CDN.
+
+        For local files, prefer :meth:`add_3d_structure_files`; it stores
+        relative URLs and can copy the sidecar files into static output
+        bundles automatically.
 
         Args:
-            values: List of structure file contents (PDB/mmCIF text), one per point.
+            values: Per-point URL/path (url) or structure content (text).
                 Use ``""`` or ``None`` for points without structures.
-            name: Column name.
+            source: ``"url"`` (default) or ``"text"``.
             fmt: Structure format — ``"pdb"`` (default) or ``"mmcif"``/``"cif"``.
+            name: Column name.
         """
         if isinstance(values, np.ndarray):
             values = values.tolist()
         else:
             values = list(values)
+
+        if source not in ("url", "text"):
+            raise ValueError(f"source must be 'url' or 'text', got {source!r}.")
 
         fmt = fmt.lower()
         if fmt in ("cif", "mmcif"):
@@ -800,15 +853,81 @@ class TmapViz:
         elif fmt != "pdb":
             raise ValueError(f"Unsupported structure format '{fmt}'. Use 'pdb' or 'cif'.")
 
-        if self._structures_column is not None:
+        if self._structures_3d_column is not None:
             raise ValueError(
-                f"Only one structures column is supported. "
-                f"Already have '{self._structures_column}', cannot add '{name}'."
+                f"Only one 3D structures column is supported. "
+                f"Already have '{self._structures_3d_column}', cannot add '{name}'."
             )
 
-        self._structures_column = name
-        self._structures_format = fmt
+        self._structures_3d_column = name
+        self._structures_3d_source = source
+        self._structures_3d_format = fmt
+        self._structures_3d_file_paths = None
+        self._structures_3d_copy_sidecars = False
         self._columns[name] = Column(name, values, "label", "label")
+
+    def add_3d_structure_files(
+        self,
+        paths: Sequence[str | Path | None],
+        *,
+        copy: bool = True,
+        directory: str | Path = "structures",
+        fmt: str = "pdb",
+        name: str = "structure",
+    ) -> None:
+        """Attach local PDB/mmCIF files and optionally copy them into outputs.
+
+        This is the most convenient API when you have a folder of local
+        structures. The visualization stores browser-facing relative URLs. When
+        ``copy=True`` (default), :meth:`write_static` and :meth:`write_html`
+        copy the referenced files into ``directory`` next to the generated
+        HTML.
+
+        Args:
+            paths: Local file paths, one per point. ``None`` or ``""`` means
+                no structure for that point.
+            copy: If True, copy files into the rendered output bundle and store
+                relative URLs like ``"structures/1CRN.pdb"``. If False, store
+                the provided path strings unchanged.
+            directory: Relative sidecar directory used when ``copy=True``.
+            fmt: Structure format — ``"pdb"`` (default) or ``"mmcif"``/``"cif"``.
+            name: Column name.
+        """
+        path_values = list(paths)
+
+        if not copy:
+            self.add_3d_structures(
+                ["" if p is None else str(p) for p in path_values],
+                source="url",
+                fmt=fmt,
+                name=name,
+            )
+            return
+
+        sidecar_dir = _normalize_structure_sidecar_dir(directory)
+        seen_files: set[str] = set()
+        path_to_url: dict[str, str] = {}
+        file_paths: list[Path | None] = []
+        urls: list[str] = []
+
+        for p in path_values:
+            if p is None or str(p) == "":
+                file_paths.append(None)
+                urls.append("")
+                continue
+
+            src = Path(p)
+            key = str(src)
+            if key not in path_to_url:
+                filename = _unique_structure_filename(src, seen_files)
+                path_to_url[key] = f"{sidecar_dir}/{filename}"
+
+            file_paths.append(src)
+            urls.append(path_to_url[key])
+
+        self.add_3d_structures(urls, source="url", fmt=fmt, name=name)
+        self._structures_3d_file_paths = file_paths
+        self._structures_3d_copy_sidecars = True
 
     @property
     def filterable(self) -> list[str]:
@@ -1116,6 +1235,18 @@ class TmapViz:
                     f"Edge indices must be < n_points ({n}). Got max edge index {max_idx}."
                 )
 
+    def _resolve_widget_color(self, color_key: str | None) -> str | list[str] | None:
+        """Translate a stored color key into something jscatter accepts.
+
+        Custom hex lists/dicts are saved under a ``_custom_<column>`` key in
+        ``self._custom_colormaps``; jscatter only understands matplotlib
+        colormap names or raw color lists, so resolve the key back to the
+        hex list before handing it over.
+        """
+        if isinstance(color_key, str) and color_key in self._custom_colormaps:
+            return list(self._custom_colormaps[color_key])
+        return color_key
+
     def to_widget(
         self,
         *,
@@ -1162,7 +1293,7 @@ class TmapViz:
 
         color_map: str | list[str] | dict[str, str] | None = None
         if selected_layout is not None:
-            color_map = self._columns[selected_layout].color
+            color_map = self._resolve_widget_color(self._columns[selected_layout].color)
 
         tooltip_properties = [name for name in self._labels_keys if name in self._columns]
 
@@ -1250,7 +1381,7 @@ class TmapViz:
                 def _on_layout_change(change: dict[str, Any]) -> None:
                     layout_name = change["new"]
                     col = self._columns[layout_name]
-                    cmap = col.color
+                    cmap = self._resolve_widget_color(col.color)
                     # Reset norm so jscatter re-derives min/max from the new column
                     scatter.color(by=layout_name, map=cmap, norm=None)
                     scatter.legend(True)
@@ -1374,6 +1505,39 @@ class TmapViz:
             if name not in self._columns:
                 raise ValueError(f"Label '{name}' is registered but has no column data.")
 
+    def _resolve_template_name(self, template_name: str) -> str:
+        """Select the protein template automatically for local 3D structures."""
+        if template_name == "base.html.j2" and self._structures_3d_column is not None:
+            return "protein.html.j2"
+        return template_name
+
+    def _copy_structure_sidecars(self, output_dir: Path) -> None:
+        """Copy local structure files into the generated output bundle."""
+        if not self._structures_3d_copy_sidecars or not self._structures_3d_file_paths:
+            return
+        if self._structures_3d_column is None:
+            return
+
+        column = self._columns.get(self._structures_3d_column)
+        if column is None:
+            return
+
+        copied: set[Path] = set()
+        for src, url in zip(self._structures_3d_file_paths, column.values, strict=True):
+            if src is None or not url:
+                continue
+            if not src.exists():
+                raise FileNotFoundError(f"3D structure file not found: {src}")
+            if not src.is_file():
+                raise ValueError(f"3D structure path is not a file: {src}")
+
+            dest = output_dir / str(url)
+            if dest in copied:
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied.add(dest)
+
     def to_html(self, template_name: str = "base.html.j2") -> str:
         """Return a self-contained HTML document as a string.
 
@@ -1388,6 +1552,7 @@ class TmapViz:
             Full HTML document string.
         """
         self._validate()
+        template_name = self._resolve_template_name(template_name)
 
         n_points = len(self._points_array)
 
@@ -1485,8 +1650,9 @@ class TmapViz:
             "imagesColumn": self._images_column,
             "imagesTooltipSize": self._images_tooltip_size,
             "proteinColumn": self._protein_column,
-            "structuresColumn": self._structures_column,
-            "structuresFormat": self._structures_format,
+            "structures3dColumn": self._structures_3d_column,
+            "structures3dSource": self._structures_3d_source,
+            "structures3dFormat": self._structures_3d_format,
             "nEdges": n_edges,
             "columns": columns_meta,
             "card": self._card_config,
@@ -1563,6 +1729,7 @@ class TmapViz:
         html = self.to_html(template_name=template_name)
 
         output_path.write_text(html, encoding="utf-8")
+        self._copy_structure_sidecars(output_path.parent)
         return output_path
 
     def write_static(
@@ -1584,6 +1751,7 @@ class TmapViz:
             Path to the output directory.
         """
         self._validate()
+        template_name = self._resolve_template_name(template_name)
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1687,8 +1855,9 @@ class TmapViz:
             "imagesColumn": self._images_column,
             "imagesTooltipSize": self._images_tooltip_size,
             "proteinColumn": self._protein_column,
-            "structuresColumn": self._structures_column,
-            "structuresFormat": self._structures_format,
+            "structures3dColumn": self._structures_3d_column,
+            "structures3dSource": self._structures_3d_source,
+            "structures3dFormat": self._structures_3d_format,
             "nEdges": n_edges,
             "columns": columns_meta,
             "card": self._card_config,
@@ -1702,6 +1871,7 @@ class TmapViz:
             allow_nan=False,
         )
         (output_dir / "metadata.json").write_text(metadata_json, encoding="utf-8")
+        self._copy_structure_sidecars(output_dir)
 
         # --- Render the HTML shell in fetch mode ---
         # Data is served from files written above (metadata.json, coords.bin, etc.).

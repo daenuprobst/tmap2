@@ -24,12 +24,15 @@ if TYPE_CHECKING:
     from tmap.visualization import TmapViz
 
 
-def _resolve_ann_backend(seed: int | None = None) -> USearchIndex:
+def _resolve_ann_backend(
+    seed: int | None = None,
+    threads: int = 0,
+) -> USearchIndex:
     """Return an ANN index for cosine/euclidean kNN search.
 
     Uses USearch (included as a core dependency).
     """
-    return USearchIndex(seed=seed)
+    return USearchIndex(seed=seed, threads=threads)
 
 
 def _select_lsh_l(d: int, n_samples: int) -> int:
@@ -84,12 +87,21 @@ class TMAP:
         n_permutations: Number of MinHash permutations for jaccard.
         kc: Search multiplier for the LSH forest. Larger values usually give
             better recall but cost more time.
-        seed: Random seed for the layout.
+        seed: Random seed for the OGDF layout. The MinHash + LSH kNN path
+            is fully deterministic for a given seed. The USearch HNSW path
+            (binary jaccard, cosine, euclidean) is multi-threaded by default
+            and may return slightly different equidistant neighbors across
+            runs, which can change the tree topology and layout. Pass
+            ``reproducible=True`` to force a deterministic build.
         minhash_seed: Random seed for MinHash when metric is ``"jaccard"``.
         layout_iterations: Number of OGDF layout iterations.
         layout_config: Optional advanced OGDF layout config.
         store_index: If True, keep the dense ANN index after ``fit()`` so you
             can later call ``transform()`` or ``add_points()``.
+        reproducible: If True, build the USearch HNSW index single-threaded
+            so the kNN graph is bit-identical across runs. Slower (roughly
+            5-7x for HNSW build at 10k+ points), but guarantees the same
+            coordinates from the same data and seed. Default ``False``.
 
     Example:
         >>> model = TMAP(metric="jaccard", n_neighbors=20).fit(binary_matrix)
@@ -108,6 +120,7 @@ class TMAP:
         layout_iterations: int = 1000,
         layout_config: Any | None = None,
         store_index: bool = False,
+        reproducible: bool = False,
     ) -> None:
         if n_neighbors <= 0:
             raise ValueError(f"n_neighbors must be > 0, got {n_neighbors}")
@@ -131,6 +144,7 @@ class TMAP:
         self.layout_iterations = layout_iterations
         self.layout_config = layout_config
         self.store_index = store_index
+        self.reproducible = reproducible
 
         self._embedding: NDArray[np.float32] | None = None
         self._index: Any | None = None
@@ -190,6 +204,7 @@ class TMAP:
                 index = USearchIndex(
                     seed=self.seed,
                     expansion_search=512,
+                    threads=1 if self.reproducible else 0,
                 )
                 index.build_from_binary(binary)
                 knn = index.query_knn(k=self.n_neighbors)
@@ -241,7 +256,10 @@ class TMAP:
                 raise ValueError(
                     f"n_neighbors={self.n_neighbors} must be < n_samples={X_dense.shape[0]}"
                 )
-            index = _resolve_ann_backend(seed=self.seed)
+            index = _resolve_ann_backend(
+                seed=self.seed,
+                threads=1 if self.reproducible else 0,
+            )
             index.build_from_vectors(X_dense, metric=self.metric)
             knn = index.query_knn(k=self.n_neighbors)
             self._lsh_forest = None
@@ -983,6 +1001,31 @@ class TMAP:
             Array of shape ``(n_samples,)`` with tree distances.
         """
         return self.tree_.distances_from(source)
+
+    def hops(self, from_idx: int, to_idx: int) -> int:
+        """Number of tree edges between two points (weight-agnostic).
+
+        Delegates to :meth:`Tree.hops`.
+        """
+        return self.tree_.hops(from_idx, to_idx)
+
+    def hops_from(self, source: int) -> NDArray[np.int32]:
+        """Hop count from *source* to every other point.
+
+        Unweighted analogue of :meth:`distances_from`; unreachable points
+        receive ``-1``. Delegates to :meth:`Tree.hops_from`.
+
+        Parameters
+        ----------
+        source : int
+            Source point index.
+
+        Returns
+        -------
+        NDArray[np.int32]
+            Array of shape ``(n_samples,)`` with hop counts.
+        """
+        return self.tree_.hops_from(source)
 
     def _make_layout_config(self) -> Any | None:
         if self.layout_config is not None:

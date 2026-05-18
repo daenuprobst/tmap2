@@ -382,6 +382,81 @@ class TestTreeDistance:
             tree.distance(0, 4)
 
 
+class TestTreeHops:
+    """Tests for Tree.hops()."""
+
+    def test_self_hops_zero(self):
+        tree = _make_chain_tree(5)
+        assert tree.hops(2, 2) == 0
+
+    def test_adjacent_one_hop(self):
+        tree = _make_chain_tree(5)
+        assert tree.hops(0, 1) == 1
+
+    def test_chain_counts_edges(self):
+        tree = _make_chain_tree(5)
+        assert tree.hops(0, 4) == 4
+
+    def test_independent_of_weights(self):
+        tree = _make_chain_tree(5, weight=7.5)
+        assert tree.hops(0, 4) == 4
+
+    def test_symmetry(self):
+        tree = _make_chain_tree(5)
+        assert tree.hops(1, 3) == tree.hops(3, 1)
+
+    def test_star_through_hub(self):
+        tree = _make_star_tree(5)
+        assert tree.hops(1, 3) == 2
+
+    def test_returns_int(self):
+        tree = _make_chain_tree(3)
+        assert isinstance(tree.hops(0, 2), int)
+
+    def test_invalid_from_idx(self):
+        tree = _make_chain_tree(3)
+        with pytest.raises(ValueError, match="from_idx"):
+            tree.hops(-1, 1)
+
+    def test_disconnected_raises(self):
+        tree = _make_disconnected_tree()
+        with pytest.raises(IndexError, match="No path"):
+            tree.hops(0, 4)
+
+
+class TestTreeHopsFrom:
+    """Tests for Tree.hops_from()."""
+
+    def test_source_zero(self):
+        tree = _make_chain_tree(4)
+        np.testing.assert_array_equal(tree.hops_from(0), [0, 1, 2, 3])
+
+    def test_shape_and_dtype(self):
+        hops = _make_chain_tree(5).hops_from(0)
+        assert hops.shape == (5,)
+        assert hops.dtype == np.int32
+
+    def test_middle_start(self):
+        tree = _make_chain_tree(5)
+        np.testing.assert_array_equal(tree.hops_from(2), [2, 1, 0, 1, 2])
+
+    def test_independent_of_weights(self):
+        tree = _make_chain_tree(4, weight=9.0)
+        np.testing.assert_array_equal(tree.hops_from(0), [0, 1, 2, 3])
+
+    def test_disconnected_minus_one(self):
+        hops = _make_disconnected_tree().hops_from(0)
+        np.testing.assert_array_equal(hops, [0, 1, 2, -1, -1])
+
+    def test_star_hops(self):
+        np.testing.assert_array_equal(_make_star_tree(4).hops_from(0), [0, 1, 1, 1])
+
+    def test_invalid_source(self):
+        tree = _make_chain_tree(3)
+        with pytest.raises(ValueError, match="source"):
+            tree.hops_from(-1)
+
+
 class TestTreeSubtree:
     """Tests for Tree.subtree()."""
 

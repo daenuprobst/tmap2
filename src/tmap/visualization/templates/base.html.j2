@@ -1071,7 +1071,7 @@ await Promise.all(criticalFetches);
 // Tooltips and cards degrade gracefully (skip unloaded columns).
 const _deferredNames = [];
 for (const name of labelOptions) { if (!columns[name]) _deferredNames.push(name); }
-for (const special of [metadata.imagesColumn, metadata.structuresColumn]) {
+for (const special of [metadata.imagesColumn, metadata.structures3dColumn]) {
   if (special && columnMeta[special] && !columns[special]) _deferredNames.push(special);
 }
 (async () => {
@@ -1747,7 +1747,7 @@ function renderCardStack() {
   }
 
   // Structure container placeholder (only if SMILES or protein data exists)
-  if (metadata.smilesColumn || metadata.proteinColumn || metadata.structuresColumn) {
+  if (metadata.smilesColumn || metadata.proteinColumn || metadata.structures3dColumn) {
     html += '<div class="card-structure-container hidden" id="card-structure"></div>';
   }
   // Image container placeholder (only if images data exists)
@@ -2911,46 +2911,6 @@ if (proteinColumn && columns[proteinColumn]) {
   console.log('Protein column specified but not found in columns');
 }
 
-// ============================================
-// Local 3D Structure Rendering (PDB/CIF data)
-// ============================================
-
-const structuresColumn = metadata.structuresColumn;
-const structuresFormat = metadata.structuresFormat || 'pdb';
-
-if (structuresColumn && columns[structuresColumn]) {
-  cardStack.addEventListener('cardrendered', async (e) => {
-    const { idx } = e.detail;
-    const strCol = columns[structuresColumn];
-    if (!strCol) return;
-    const structData = strCol.values[idx];
-    if (!structData || typeof structData !== 'string' || !structData.trim()) return;
-
-    const cards = cardStack.querySelectorAll('.card');
-    const card = cards[cards.length - 1];
-    if (!card) return;
-
-    const sc = card.querySelector('.card-structure-container');
-    if (!sc) return;
-
-    sc.classList.remove('hidden');
-    sc.style.height = '250px';
-    sc.style.background = '#1a1a2e';
-    sc.innerHTML = '<span class="structure-loading">Loading 3D viewer...</span>';
-
-    try {
-      await load3Dmol();
-      render3DStructure(sc, structData, structuresFormat);
-    } catch (err) {
-      console.warn('Failed to render structure:', err);
-      sc.innerHTML = '<span class="structure-error">Failed to render structure</span>';
-    }
-  });
-
-  console.log('Local structure rendering enabled for column:', structuresColumn, 'format:', structuresFormat);
-} else if (structuresColumn) {
-  console.log('Structures column specified but not found in columns');
-}
 {% block extra_runtime %}{% endblock %}
 `;
 

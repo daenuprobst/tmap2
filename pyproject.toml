@@ -41,16 +41,19 @@ dependencies = [
 notebook = ["jupyter-scatter>=0.22.2"]
 chemistry = ["rdkit>=2023.3"]
 singlecell = ["anndata>=0.10"]
+proteins = ["biopython>=1.80"]
 all = [
     "jupyter-scatter>=0.22.2",
     "rdkit>=2023.3",
     "anndata>=0.10",
+    "biopython>=1.80",
 ]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.1",
     "matplotlib>=3.7",
+    "biopython>=1.80",
 ]
 
 [project.urls]
