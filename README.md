@@ -47,28 +47,30 @@ pip install biopython # protein helpers (ProtParam properties, PDB parsing)
 
 > **Note:** The import name is `tmap`, not `tmap2`.
 
-## Quick Start
+## Quick Start 
+
+### Binary Data (e.g. Chemical Fingerprints)
 
 ```python
-import numpy as np
+from tmap.utils import fingerprints_from_smiles
 from tmap import TMAP
 
-# Binary fingerprints (Jaccard)
-X = np.random.randint(0, 2, (1000, 2048), dtype=np.uint8)
-model = TMAP(metric="jaccard", n_neighbors=20, seed=42).fit(X)
-model.to_html("map.html")
+smiles = [...] # Your smiles list
+# Get Binary fingerprints (Need Jaccard distance)
+fps = fingerprints_from_smiles(smiles, fp_type="morgan", radius=2, n_bits=2048)
+model = TMAP(metric="jaccard", n_neighbors=20, seed=42).fit(fps)
+model.write_html("map.html") # Save in html file
+# model.show() # See in Jupyter Notebook 
 ```
 
+### Continuous Vectors (e.g. Protein Embeddings)
+
 ```python
-# Dense embeddings (cosine / euclidean)
+# embeddings (use cosine / euclidean distances)
 X = np.random.random((1000, 128)).astype(np.float32)
 model = TMAP(metric="cosine", n_neighbors=20).fit(X)
-new_coords = model.transform(X[:10])
-```
-
-```python
-# Interactive notebook widget
-model.plot(color_by="label", data=df, tooltip_properties=["name", "score"])
+# model.write_html("tmap.html") # Save in html file
+model.show() # See in Jupyter Notebook 
 ```
 
 ## Key Features
@@ -76,25 +78,35 @@ model.plot(color_by="label", data=df, tooltip_properties=["name", "score"])
 - **Tree structure**: follow branches, trace paths, compute pseudotime
 - **Deterministic**: same input + seed = same output
 - **Multiple metrics**: `jaccard`, `cosine`, `euclidean`, `precomputed`
-- **Incremental**: `add_points()` and `transform()` for new data
+- **Incremental**: `add_points()` and `transform()` for adding new data into an existing TMAP 
 - **Model persistence**: `save()` / `load()`
 - **Three viz backends**: interactive HTML, jupyter-scatter, matplotlib
 
-## Visualization
-
-**Interactive HTML**: lasso selection, light/dark theme, filter and search panels, pinned metadata cards, binary mode for large datasets.
+## Visualization (add colors, labels...) 
 
 **Notebook widgets**:  color switching, categorical filtering, and lasso selection with pandas-backed metadata:
 
+### Add Colors & Labels
+
+Adding colors is quite simple. Just pass the name of the layout (e.g. Molecular Weight, Age, Protein Lenght ...), a list of values for each node and matplotlib color. 
+If the data is categorical (e.g. Age or Heavy Atom Count) pass `categorical=True` so that categorical colors like `tab10` become available.
+To add labels (i.e. data that is not needed for coloring the nodes) just pass a name for the labels and the list of values. 
+
 ```python
-viz = model.to_tmapviz()
-viz.add_color_layout("Molecular Weight", mw.tolist(), categorical=False)
+model = TMAP(metric="jaccard").fit(X)
+viz = model.to_tmapviz() 
+viz.add_color_layout("Molecular Weight", mw.tolist(), categorical=False) 
 viz.add_color_layout("Scaffold", scaffolds, categorical=True, color="tab10")
 viz.add_label("SMILES", smiles_list)
-viz.show(width=1000, height=620, controls=True)
+viz.show(width=1000, height=620, controls=True) # to see in jupyter notebook
+# viz.write_html("mytmap.html") # to save and see as HTML in the browser
 ```
+> Here SMILES are added as label which will not trigger the 2D image of the structure. If you want to see the structures add smiles via
+> `add_smiles(smiles_list)`
 
-**Static plots** — matplotlib for publication figures: `model.plot_static(color_by=labels)`
+If you save using `viz.write_html("name.html")` the **Interactive HTML** becomes available which supports lasso selection, light/dark theme, filter and search panels, pinned metadata cards, binary mode for large datasets.
+
+Alternatively, you can see it with matplotlib by using **Static plots** matplotlib for publication figures: `model.plot_static(color_by=labels)` 
 
 ## Domain Utilities
 
