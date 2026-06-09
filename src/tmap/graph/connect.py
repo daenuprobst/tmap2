@@ -1,23 +1,4 @@
 """Connect a disconnected k-NN graph into a single component.
-
-When ``n_neighbors`` (k) is too low, the k-NN graph can fragment into several
-connected components.  Its minimum spanning tree is then a *forest* (one tree
-per component), the layout packs the components as disjoint blobs, and TMAP's
-``path`` / ``distance`` / ``distances_from`` operations are undefined across
-components.
-
-``connect_knn_components`` detects the components and adds the minimum-weight
-"bridge" edges needed to join them into one, so the downstream MST yields a
-single spanning tree.  Bridges are found by re-querying the ANN index for more
-neighbors -- the shortest cross-component links the kept-k graph missed -- using
-a Boruvka/Kruskal-style sweep.  If no index is available (e.g. a user-supplied
-``knn_graph``), or some components stay isolated even at a large neighbor count,
-the remaining components are joined through representative nodes as a last
-resort so a single tree is always guaranteed.
-
-Bridge edges are appended as extra neighbor columns on the returned ``KNNGraph``
-(unused slots use index ``-1`` / distance ``inf``, which every downstream reader
-already skips), so the augmentation is transparent to the rest of the pipeline.
 """
 
 from __future__ import annotations
@@ -29,8 +10,6 @@ from numpy.typing import NDArray
 
 from tmap.index.types import KNNGraph
 
-# A callable that returns a fresh KNNGraph with ``k`` neighbors per node, used to
-# look for cross-component links the kept-k graph missed.
 RequeryFn = Callable[[int], KNNGraph]
 
 
@@ -142,7 +121,7 @@ def connect_knn_components(
     n_components = dsu.n_sets
     bridges: list[tuple[int, int, float]] = []
 
-    # 2. Boruvka/Kruskal sweep: re-query with a growing neighbor count and add
+    # 2. Boruvka/Kruskal sweep. Re-query with a growing neighbor count and add
     #    the shortest cross-component edges until everything is joined.
     if requery is not None:
         k_try = max(knn.k * 4, 16)
@@ -162,7 +141,8 @@ def connect_knn_components(
                         if dsu.n_sets == 1:
                             break
             if k_eff >= min(n - 1, max_neighbors):
-                break  # neighbor count maxed out; rest goes to the fallback
+                # neighbor count maxed out
+                break
             k_try *= 2
 
     # 3. Last resort: chain any still-separate components through representatives.
@@ -173,6 +153,7 @@ def connect_knn_components(
             if r not in reps:
                 reps[r] = i
         rep_nodes = list(reps.values())
+
         # Weight bridges as the most expensive edges so the MST adds them last.
         fallback_w = max((w for _, _, w in bridges), default=0.0)
         if fallback_w == 0.0:
