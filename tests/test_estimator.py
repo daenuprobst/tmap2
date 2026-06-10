@@ -3,7 +3,7 @@ import pytest
 
 from tmap import TMAP
 from tmap.index.types import KNNGraph
-from tmap.layout import LayoutConfig, OGDF_AVAILABLE
+from tmap.layout import OGDF_AVAILABLE
 
 
 def _clustered_binary_data(
@@ -155,16 +155,22 @@ def test_reproducible_holds_with_custom_layout_config() -> None:
     reproducible=True. The estimator now stamps deterministic/seed onto whichever
     config it uses, default-constructed or passed in.
     """
+    from tmap.layout import LayoutConfig
+
     data = np.random.default_rng(0).standard_normal((120, 8)).astype(np.float32)
 
     def fit_once() -> np.ndarray:
-        return TMAP(
-            metric="euclidean",
-            n_neighbors=10,
-            seed=42,
-            reproducible=True,
-            layout_config=LayoutConfig(),
-        ).fit(data).embedding_
+        return (
+            TMAP(
+                metric="euclidean",
+                n_neighbors=10,
+                seed=42,
+                reproducible=True,
+                layout_config=LayoutConfig(),
+            )
+            .fit(data)
+            .embedding_
+        )
 
     np.testing.assert_array_equal(fit_once(), fit_once())
 
