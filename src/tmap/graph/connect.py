@@ -7,6 +7,8 @@ from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from tmap.index.types import KNNGraph
 
@@ -35,6 +37,19 @@ class _DSU:
         self.n_sets -= 1
         return True
 
+    @classmethod
+    def from_labels(cls, labels: NDArray[np.int64], n_sets: int) -> _DSU:
+        """Build a DSU whose sets are precomputed component labels (0..n_sets-1).
+
+        Each node points one hop to its component's representative (the first
+        node carrying that label), so no per-edge union pass is needed.
+        """
+        dsu = cls(labels.shape[0])
+        _, first = np.unique(labels, return_index=True)
+        dsu.parent = first[labels].astype(np.int64)
+        dsu.n_sets = n_sets
+        return dsu
+
 
 def _valid_edges(
     knn: KNNGraph,
@@ -49,9 +64,24 @@ def _valid_edges(
     return src[mask], dst[mask], dist[mask]
 
 
+def _components(
+    n: int, src: NDArray[np.int64], dst: NDArray[np.int64]
+) -> tuple[int, NDArray[np.int64]]:
+    """(n_components, component-label-per-node) for the undirected edge set."""
+    adj = coo_matrix((np.ones(src.size, dtype=np.int8), (src, dst)), shape=(n, n))
+    n_comp, labels = connected_components(adj, directed=False)
+    return n_comp, labels.astype(np.int64)
+
+
 def _labels(dsu: _DSU, n: int) -> NDArray[np.int64]:
-    """Current root (component id) of every node."""
-    return np.array([dsu.find(i) for i in range(n)], dtype=np.int64)
+    """Current root (component id) of every node (vectorized full find)."""
+    parent = dsu.parent
+    root = np.arange(n)
+    while True:
+        up = parent[root]
+        if np.array_equal(up, root):
+            return root.astype(np.int64)
+        root = up
 
 
 def _augment(knn: KNNGraph, bridges: list[tuple[int, int, float]]) -> KNNGraph:
@@ -110,15 +140,16 @@ def connect_knn_components(
     if n < 2:
         return knn, 1, 0
 
-    # 1. Components of the current graph.
+    # 1. Components of the current graph. scipy's connected_components runs in C,
+    #    avoiding a Python union pass over all n*k edges on every fit.
     src, dst, _ = _valid_edges(knn)
-    dsu = _DSU(n)
-    for a, b in zip(src.tolist(), dst.tolist()):
-        dsu.union(a, b)
-    if dsu.n_sets == 1:
+    n_components, labels = _components(n, src, dst)
+    if n_components == 1:
         return knn, 1, 0
 
-    n_components = dsu.n_sets
+    # Seed the union-find from those labels so the bridging sweep starts from the
+    # real components without rescanning edges.
+    dsu = _DSU.from_labels(labels, n_components)
     bridges: list[tuple[int, int, float]] = []
 
     # 2. Boruvka/Kruskal sweep. Re-query with a growing neighbor count and add
