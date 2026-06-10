@@ -96,7 +96,12 @@ class TMAP:
             ``reproducible=True`` to force a deterministic build.
         minhash_seed: Random seed for MinHash when metric is ``"jaccard"``.
         layout_iterations: Number of OGDF layout iterations.
-        layout_config: Optional advanced OGDF layout config.
+        layout_config: Optional advanced OGDF layout config. Its
+            ``deterministic`` and ``seed`` fields are managed by the estimator
+            (always a seeded, deterministic layout) and are set on the object
+            you pass, in place; set other knobs (e.g. ``ns_cap``, ``untangle``)
+            freely. For a nondeterministic / multi-threaded layout, use
+            ``tmap.layout.layout_from_knn_graph``.
         store_index: If True, keep the dense ANN index after ``fit()`` so you
             can later call ``transform()`` or ``add_points()``.
         reproducible: If True, build the USearch HNSW index single-threaded
@@ -1089,14 +1094,20 @@ class TMAP:
         return self.tree_.hops_from(source)
 
     def _make_layout_config(self) -> Any | None:
-        if self.layout_config is not None:
-            return self.layout_config
-        if LayoutConfig is None:
-            return None
+        config = self.layout_config
+        if config is None:
+            if LayoutConfig is None:
+                return None
+            config = LayoutConfig()
+            if hasattr(config, "fme_iterations"):
+                config.fme_iterations = self.layout_iterations
 
-        config = LayoutConfig()
-        if hasattr(config, "fme_iterations"):
-            config.fme_iterations = self.layout_iterations
+        # The estimator owns layout reproducibility: always run a deterministic,
+        # seeded layout, whether or not a custom layout_config was passed. The
+        # HNSW index build is the separate, multi-threaded-by-default stage gated
+        # by `reproducible`; the layout's own multi-threading gives no measurable
+        # speedup, so determinism here is free. For a nondeterministic/
+        # multi-threaded layout, call tmap.layout.layout_from_knn_graph directly.
         if hasattr(config, "deterministic"):
             config.deterministic = True
         if hasattr(config, "seed"):
