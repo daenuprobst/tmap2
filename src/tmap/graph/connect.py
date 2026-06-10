@@ -1,5 +1,4 @@
-"""Connect a disconnected k-NN graph into a single component.
-"""
+"""Connect a disconnected k-NN graph into a single component."""
 
 from __future__ import annotations
 

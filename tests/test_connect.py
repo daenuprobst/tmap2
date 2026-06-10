@@ -32,9 +32,7 @@ def _separated_blobs(n_per: int = 150, n_blobs: int = 4, dim: int = 8, seed: int
 
 def test_disconnected_knn_has_multiple_components():
     # Build a graph that is two disjoint triangles (no cross edges).
-    indices = np.array(
-        [[1, 2], [0, 2], [0, 1], [4, 5], [3, 5], [3, 4]], dtype=np.int32
-    )
+    indices = np.array([[1, 2], [0, 2], [0, 1], [4, 5], [3, 5], [3, 4]], dtype=np.int32)
     distances = np.ones((6, 2), dtype=np.float32)
     knn = KNNGraph.from_arrays(indices, distances)
     assert _n_components(knn) == 2
@@ -42,9 +40,7 @@ def test_disconnected_knn_has_multiple_components():
 
 def test_connect_without_index_uses_representative_fallback():
     # Two disjoint triangles, no requery callable -> fallback chaining.
-    indices = np.array(
-        [[1, 2], [0, 2], [0, 1], [4, 5], [3, 5], [3, 4]], dtype=np.int32
-    )
+    indices = np.array([[1, 2], [0, 2], [0, 1], [4, 5], [3, 5], [3, 4]], dtype=np.int32)
     distances = np.ones((6, 2), dtype=np.float32)
     knn = KNNGraph.from_arrays(indices, distances)
 
